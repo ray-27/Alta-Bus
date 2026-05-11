@@ -11,9 +11,13 @@ pub struct PriceTick {
 
 //Total encode size: 32 bytes
 
+impl PriceTick {
+    pub const ENCODED_SIZE: usize = 32;
+}
+
 impl Encode for PriceTick {
     fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(32);
+        let mut buf = Vec::with_capacity(Self::ENCODED_SIZE);
         // using little-endian order for encoding and decoding
         buf.extend_from_slice(&self.instrument_id.to_le_bytes());
         buf.extend_from_slice(&self.last_price.to_le_bytes());
@@ -26,7 +30,7 @@ impl Encode for PriceTick {
 
 impl Decode for PriceTick {
     fn decode(buf: &[u8]) -> Option<Self> {
-        if buf.len() < 32 {
+        if buf.len() < Self::ENCODED_SIZE {
             return None;
         }
         Some(Self {
