@@ -1,11 +1,12 @@
 pub mod header;
 pub mod types;
-// pub mod messages;
-// pub mod codec;
-// pub mod config;
+pub mod messages;
+pub mod codec;
+pub mod config;
 
 pub use header::{HEADER_SIZE, MsgHeader};
 pub use types::MsgType;
+pub use codec::{Encode, Decode};
 
 #[cfg(test)]
 mod tests {
