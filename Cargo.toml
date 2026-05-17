@@ -6,5 +6,5 @@ edition = "2024"
 [dependencies]
 
 [workspace]
-members = ["protocol","bus", "publisher-client", "subscriber-client", "bench",]
+members = ["protocol", "bus", "publisher-client", "subscriber-client", "bench",]
 resolver = "2"
