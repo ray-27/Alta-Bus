@@ -7,7 +7,11 @@ pub struct MsgHeader {
     pub payload_len: u32,
 }
 
-pub const HEADER_SIZE: usize = std::mem::size_of::<MsgHeader>();
+// Explicit wire size: 1 (msg_type) + 4 (channel_id) + 8 (timestamp_ns) + 4 (payload_len) = 17.
+// Do NOT use std::mem::size_of::<MsgHeader>() — that returns 24 because the compiler
+// adds 7 bytes of alignment padding to the in-memory struct. The wire format is
+// defined by to_bytes()/from_bytes(), which write/read exactly 17 bytes.
+pub const HEADER_SIZE: usize = 1 + 4 + 8 + 4; // = 17
 
 impl MsgHeader {
     pub fn new(msg_type: u8, channel_id: u32, payload_len: u32) -> Self {
