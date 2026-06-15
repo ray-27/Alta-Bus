@@ -15,6 +15,10 @@ use std::thread;
 // subscriber is consistently slow — messages are dropped.
 const DEFAULT_QUEUE_DEPTH: usize = 8_192;
 
+// How many consecutive slow-consumer drops before we forcibly disconnect.
+// Set to 0 to disable forced disconnection (just keep dropping).
+const DROP_DISCONNECT_THRESHOLD: usize = 50_000;
+
 // A wire frame shared across all subscribers via Arc — one allocation per
 // published message regardless of fan-out count.
 type Frame = Arc<Vec<u8>>;
@@ -24,6 +28,8 @@ struct SubEntry {
     channels: HashSet<u32>,
     filter_all: bool,
     addr: SocketAddr,
+    /// Running count of frames dropped because this subscriber's queue was full.
+    drop_count: usize,
 }
 
 type SubRegistry = Arc<Mutex<HashMap<usize, SubEntry>>>;
@@ -94,17 +100,38 @@ fn dispatch_loop(ring: &'static Ring, consumer_id: usize, registry: SubRegistry)
                 v
             });
 
-            let subs = registry.lock().unwrap();
-            for (&id, entry) in subs.iter() {
+            let mut subs = registry.lock().unwrap();
+            let mut to_disconnect: Vec<usize> = Vec::new();
+
+            for (&id, entry) in subs.iter_mut() {
                 if !entry.filter_all && !entry.channels.contains(&d.channel_id) {
                     continue;
                 }
                 if entry.tx.try_send(Arc::clone(&frame)).is_err() {
-                    eprintln!(
-                        "[bus] subscriber {} ({}) slow — dropped msg on channel {}",
-                        id, entry.addr, d.channel_id
-                    );
+                    entry.drop_count += 1;
+                    // Log every power-of-two drop so the console isn't flooded
+                    // but you still see the trend building.
+                    if entry.drop_count.is_power_of_two() {
+                        eprintln!(
+                            "[bus] subscriber {} ({}) slow — {} frames dropped so far (queue depth {})",
+                            id, entry.addr, entry.drop_count, DEFAULT_QUEUE_DEPTH
+                        );
+                    }
+                    if DROP_DISCONNECT_THRESHOLD > 0
+                        && entry.drop_count >= DROP_DISCONNECT_THRESHOLD
+                    {
+                        eprintln!(
+                            "[bus] subscriber {} ({}) exceeded drop threshold ({}) — forcing disconnect",
+                            id, entry.addr, DROP_DISCONNECT_THRESHOLD
+                        );
+                        to_disconnect.push(id);
+                    }
                 }
+            }
+            // Drop the tx handle for each subscriber that crossed the threshold.
+            // Their I/O thread will see rx.recv() -> Err and exit cleanly.
+            for id in to_disconnect {
+                subs.remove(&id);
             }
         });
 
@@ -175,6 +202,7 @@ fn handle_connection(stream: TcpStream, ring: &'static Ring, sub_registry: SubRe
                     channels,
                     filter_all,
                     addr,
+                    drop_count: 0,
                 },
             );
         }
@@ -276,34 +304,58 @@ fn run_subscriber_io(
     registry: SubRegistry,
 ) {
     let mut wbuf: Vec<u8> = Vec::with_capacity(COALESCE_BUF_CAP);
+    let mut frames_sent: u64 = 0;
+    let mut bytes_sent: u64 = 0;
 
-    'outer: loop {
-        // Block for the first frame (no CPU while idle).
-        let frame = match rx.recv() {
-            Ok(f) => f,
-            Err(_) => break, // dispatch thread dropped — bus shutting down
-        };
+    let disconnect_reason: &str = 'outer: {
+        loop {
+            // Block for the first frame (no CPU while idle).
+            let frame = match rx.recv() {
+                Ok(f) => f,
+                // tx dropped — either bus is shutting down OR the dispatch
+                // loop forcibly removed this subscriber (drop threshold hit).
+                Err(_) => break 'outer "dispatch sender dropped (slow-consumer disconnect or bus shutdown)",
+            };
 
-        wbuf.clear();
-        wbuf.extend_from_slice(&frame);
+            wbuf.clear();
+            wbuf.extend_from_slice(&frame);
 
-        // Opportunistically drain whatever else is already queued.
-        while wbuf.len() < COALESCE_BUF_CAP {
-            match rx.try_recv() {
-                Ok(f) => wbuf.extend_from_slice(&f),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    // flush what we have, then exit
-                    let _ = stream.write_all(&wbuf);
-                    break 'outer;
+            // Opportunistically drain whatever else is already queued.
+            while wbuf.len() < COALESCE_BUF_CAP {
+                match rx.try_recv() {
+                    Ok(f) => wbuf.extend_from_slice(&f),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        let _ = stream.write_all(&wbuf);
+                        break 'outer "dispatch sender dropped mid-drain";
+                    }
+                }
+            }
+
+            match stream.write_all(&wbuf) {
+                Ok(()) => {
+                    frames_sent += 1;
+                    bytes_sent += wbuf.len() as u64;
+                }
+                Err(e) => {
+                    // e.kind() tells us exactly what happened:
+                    //   BrokenPipe      — client closed the connection cleanly
+                    //   ConnectionReset — client crashed / network drop
+                    //   TimedOut        — write_timeout expired (not set here)
+                    //   WouldBlock      — non-blocking socket, not used here
+                    eprintln!(
+                        "[bus] subscriber {} ({}) write error: {} ({:?}) — frames_sent={} bytes_sent={}",
+                        id, addr, e, e.kind(), frames_sent, bytes_sent
+                    );
+                    break 'outer "TCP write error";
                 }
             }
         }
+    };
 
-        if stream.write_all(&wbuf).is_err() {
-            println!("[bus] subscriber {} ({}) disconnected", id, addr);
-            break;
-        }
-    }
+    println!(
+        "[bus] subscriber {} ({}) disconnected — reason: {} | frames_sent={} bytes_sent={}",
+        id, addr, disconnect_reason, frames_sent, bytes_sent
+    );
     registry.lock().unwrap().remove(&id);
 }

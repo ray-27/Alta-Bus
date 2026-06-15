@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // 64K SLOTS (not bytes). Each slot is ~1,088 B, so the ring occupies ~71 MB.
 // That is far larger than L3 — if your consumers keep up, 1 << 13 (8K slots,
 // ~8.7 MB) is friendlier to the cache hierarchy. Must stay a power of two.
-pub const RING_SIZE: usize = 1 << 16;
+// pub const RING_SIZE: usize = 1 << 16;
+pub const RING_SIZE: usize = 1 << 13;
 pub const RING_MASK: u64 = (RING_SIZE - 1) as u64;
 
 pub const PAYLOAD_CAP: usize = 1024;
@@ -63,7 +64,7 @@ pub struct Slot {
 
 unsafe impl Sync for Slot {}
 
-/// A 64-bit atomic counter that owns its 64-byte cache line.
+
 #[repr(align(64))]
 pub struct Cursor {
     pub value: AtomicU64,
